@@ -1,12 +1,12 @@
 {
   "category:music": [
     {
-      "id": "snoopy",
-      "name": "snoopyyyyyy",
-      "author": "Snoopy",
-      "version": "1.0.0",
-      "description": "praise snoopy",
-      "labels": ["New", "MP3", "STREAMING"],
+      "id": "apple-music-catalog",
+      "name": "Apple Music Catalog",
+      "author": "YOUR NAME",
+      "version": "2.2.0",
+      "description": "Apple Music catalog search, albums and artists with 30-second previews.",
+      "labels": ["METADATA", "PREVIEW"],
       "download": "https://raw.githubusercontent.com/uzu-wq/snoopy-again/refs/heads/main/8spine.js"
     }
   ]
