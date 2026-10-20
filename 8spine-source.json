@@ -1,0 +1,13 @@
+{
+  "category:music": [
+    {
+      "id": "snoopy",
+      "name": "snoopyyyyyy",
+      "author": "Snoopy",
+      "version": "1.0.0",
+      "description": "praise snoopy",
+      "labels": ["New", "MP3", "STREAMING"],
+      "download": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPOSITORY/main/8spine.js"
+    }
+  ]
+}
