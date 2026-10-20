@@ -1,93 +1,190 @@
 
-export const MODULE = `
-const API = 'https://saavn.dev/api';
+const BASE = 'https://saavn.dev/api';
+const SEARCH_CACHE_MS = 60 * 1000;
+const STREAM_CACHE_MS = 5 * 60 * 1000;
 
-function toText(value) {
+const searchCache = {};
+const streamCache = {};
+const trackCache = {};
+
+function toStr(value) {
     return value == null ? '' : String(value);
 }
 
+function getId(value) {
+    if (value && typeof value === 'object') {
+        return toStr(value.id || value.trackId || value.songId);
+    }
+    return toStr(value);
+}
+
 function getImage(images) {
-    if (!Array.isArray(images) || images.length === 0) return '';
-    return toText(images[images.length - 1].url);
+    if (typeof images === 'string') return images;
+    if (!Array.isArray(images) || !images.length) return '';
+
+    const preferred = images.find(function (image) {
+        return image && (
+            image.quality === '500x500' ||
+            image.quality === 'high' ||
+            image.quality === '320x320'
+        );
+    });
+
+    return toStr((preferred || images[images.length - 1]).url);
+}
+
+function getArtistNames(song) {
+    if (song.primaryArtists) return toStr(song.primaryArtists);
+
+    const artists = song.artists || {};
+    const primary = Array.isArray(artists.primary)
+        ? artists.primary
+        : [];
+
+    return primary.map(function (artist) {
+        return toStr(artist.name);
+    }).filter(Boolean).join(', ') || 'Unknown Artist';
 }
 
 function normalizeTrack(song) {
-    const artists = song.artists || {};
-    const primaryArtists = Array.isArray(artists.primary)
-        ? artists.primary.map(function (artist) {
-            return {
-                id: toText(artist.id),
-                name: toText(artist.name)
-            };
-        })
-        : [];
+    const album = song.album;
+    const albumName = album && typeof album === 'object'
+        ? album.name
+        : album;
 
-    return {
-        id: toText(song.id),
-        title: toText(song.name || song.title) || 'Unknown Track',
-        artist: toText(song.primaryArtists) ||
-            primaryArtists.map(function (artist) {
-                return artist.name;
-            }).join(', ') ||
-            'Unknown Artist',
-        album: toText(song.album && song.album.name),
+    const track = {
+        id: toStr(song.id || song.songId),
+        title: toStr(song.name || song.title) || 'Unknown Track',
+        artist: getArtistNames(song),
+        album: toStr(albumName),
         duration: Number(song.duration || 0),
-        albumCover: getImage(song.image),
-        cover: getImage(song.image),
+        albumCover: getImage(song.image || song.images),
         format: 'm4a',
         explicit: Boolean(song.explicitContent),
-        url: toText(song.url),
-        artists: { primary: primaryArtists },
-        audioQuality: 'HIGH'
+        audioQuality: 'HIGH',
+        url: toStr(song.url),
+        language: toStr(song.language)
     };
+
+    if (track.id) trackCache[track.id] = track;
+    return track;
 }
 
 async function request(path) {
-    const response = await fetch(API + path);
+    const response = await fetch(BASE + path);
 
     if (!response.ok) {
         throw new Error('JioSaavn API HTTP ' + response.status);
     }
 
-    return response.json();
+    const body = await response.text();
+
+    let data;
+    try {
+        data = JSON.parse(body);
+    } catch (error) {
+        throw new Error('JioSaavn API returned invalid JSON');
+    }
+
+    return data;
+}
+
+function getPayload(data) {
+    return data && data.data !== undefined ? data.data : data;
 }
 
 async function searchTracks(query, limit, ctx) {
     try {
-        const search = toText(query).trim();
+        const term = toStr(query).trim();
+        if (!term) return { tracks: [], total: 0 };
 
-        if (!search) {
-            return { tracks: [], total: 0 };
+        const count = Math.min(
+            Math.max(parseInt(limit, 10) || 25, 1),
+            50
+        );
+
+        const key = term.toLowerCase() + '|' + count;
+        const cached = searchCache[key];
+
+        if (cached && Date.now() - cached.time < SEARCH_CACHE_MS) {
+            return cached.value;
         }
 
-        const count = Math.min(Math.max(Number(limit) || 20, 1), 50);
         const data = await request(
-            '/search/songs?query=' + encodeURIComponent(search) +
+            '/search/songs?query=' + encodeURIComponent(term) +
             '&limit=' + count
         );
 
-        const results = data.data && data.data.results;
-        const tracks = Array.isArray(results)
-            ? results.map(normalizeTrack)
+        const payload = getPayload(data);
+        const results = payload && Array.isArray(payload.results)
+            ? payload.results
             : [];
 
-        return {
-            tracks: tracks,
-            total: tracks.length
-        };
+        const tracks = results
+            .filter(function (song) {
+                return song && (song.id || song.songId);
+            })
+            .map(normalizeTrack);
+
+        const value = { tracks: tracks, total: tracks.length };
+        searchCache[key] = { value: value, time: Date.now() };
+
+        return value;
     } catch (error) {
         console.log('[snoopy-jiosaavn] searchTracks: ' + error.message);
         return { tracks: [], total: 0 };
     }
 }
 
+async function searchAlbums(query, limit, ctx) {
+    try {
+        const term = toStr(query).trim();
+        if (!term) return { albums: [], total: 0 };
+
+        const count = Math.min(
+            Math.max(parseInt(limit, 10) || 25, 1),
+            50
+        );
+
+        const data = await request(
+            '/search/albums?query=' + encodeURIComponent(term) +
+            '&limit=' + count
+        );
+
+        const payload = getPayload(data);
+        const results = payload && Array.isArray(payload.results)
+            ? payload.results
+            : [];
+
+        const albums = results.map(function (item) {
+            return {
+                id: toStr(item.id),
+                title: toStr(item.name || item.title) || 'Unknown Album',
+                artist: toStr(item.primaryArtists || item.artist),
+                cover: getImage(item.image),
+                url: toStr(item.url),
+                trackCount: Number(item.songCount || item.trackCount || 0)
+            };
+        });
+
+        return { albums: albums, total: albums.length };
+    } catch (error) {
+        console.log('[snoopy-jiosaavn] searchAlbums: ' + error.message);
+        return { albums: [], total: 0 };
+    }
+}
+
 async function getTrackStreamUrl(id, quality, ctx) {
-    const trackId = toText(
-        id && typeof id === 'object' ? id.id : id
-    );
+    const trackId = getId(id);
 
     if (!trackId) {
         return { streamUrl: null, track: null };
+    }
+
+    const cached = streamCache[trackId];
+
+    if (cached && Date.now() - cached.time < STREAM_CACHE_MS) {
+        return cached.value;
     }
 
     try {
@@ -95,69 +192,94 @@ async function getTrackStreamUrl(id, quality, ctx) {
             '/songs/' + encodeURIComponent(trackId)
         );
 
-        const songData = data.data;
-        const song = Array.isArray(songData) ? songData[0] : songData;
+        const payload = getPayload(data);
+        const song = Array.isArray(payload)
+            ? payload[0]
+            : payload && Array.isArray(payload.songs)
+                ? payload.songs[0]
+                : payload;
 
         if (!song) {
             return {
                 streamUrl: null,
-                track: { id: trackId }
+                track: trackCache[trackId] || { id: trackId }
             };
         }
 
         const downloads = song.downloadUrl || song.downloadUrls || [];
-        const selected = Array.isArray(downloads) && downloads.length
-            ? downloads[downloads.length - 1]
+        const candidates = Array.isArray(downloads) ? downloads : [];
+
+        const playable = candidates.filter(function (item) {
+            return item && typeof item.url === 'string' &&
+                /^https?:\/\//i.test(item.url);
+        });
+
+        const selected = playable.length
+            ? playable[playable.length - 1]
             : null;
 
-        return {
-            streamUrl: selected && selected.url
-                ? selected.url
-                : null,
+        if (!selected) {
+            return {
+                streamUrl: null,
+                track: normalizeTrack(song)
+            };
+        }
+
+        const result = {
+            streamUrl: selected.url,
             streamType: 'direct',
             mimeType: 'audio/mp4',
             track: normalizeTrack(song)
         };
+
+        streamCache[trackId] = {
+            value: result,
+            time: Date.now()
+        };
+
+        return result;
     } catch (error) {
         console.log('[snoopy-jiosaavn] getTrackStreamUrl: ' + error.message);
+
         return {
             streamUrl: null,
-            track: { id: trackId }
+            track: trackCache[trackId] || { id: trackId }
         };
     }
 }
 
 async function getAlbum(id, ctx) {
-    const albumId = toText(
-        id && typeof id === 'object' ? id.id : id
-    );
+    const albumId = getId(id);
 
-    if (!albumId) {
-        return { album: null, tracks: [] };
-    }
+    if (!albumId) return { album: null, tracks: [] };
 
     try {
         const data = await request(
-            '/albums?id=' + encodeURIComponent(albumId)
+            '/albums/' + encodeURIComponent(albumId)
         );
 
-        const result = data.data;
+        const payload = getPayload(data);
+        const albumData = Array.isArray(payload)
+            ? payload[0]
+            : payload;
 
-        if (!result) {
-            return { album: null, tracks: [] };
-        }
+        if (!albumData) return { album: null, tracks: [] };
 
-        const songs = Array.isArray(result.songs) ? result.songs : [];
+        const songs = Array.isArray(albumData.songs)
+            ? albumData.songs
+            : [];
+
+        const album = {
+            id: toStr(albumData.id || albumId),
+            title: toStr(albumData.name || albumData.title) || 'Unknown Album',
+            artist: toStr(albumData.primaryArtists),
+            cover: getImage(albumData.image),
+            url: toStr(albumData.url),
+            trackCount: songs.length
+        };
 
         return {
-            album: {
-                id: toText(result.id),
-                title: toText(result.name || result.title),
-                artist: toText(result.primaryArtists),
-                cover: getImage(result.image),
-                trackCount: songs.length,
-                url: toText(result.url)
-            },
+            album: album,
             tracks: songs.map(normalizeTrack)
         };
     } catch (error) {
@@ -169,12 +291,12 @@ async function getAlbum(id, ctx) {
 return {
     id: 'snoopy-jiosaavn',
     name: 'Snoopy Shit',
-    version: '1.0.3',
+    version: '1.0.4',
     labels: ['JioSaavn', 'STREAMING'],
     noStreamCache: true,
     searchTracks: searchTracks,
+    searchAlbums: searchAlbums,
     getTrackStreamUrl: getTrackStreamUrl,
     getTrackDownloadUrl: getTrackStreamUrl,
     getAlbum: getAlbum
 };
-`;
